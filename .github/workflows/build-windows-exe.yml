@@ -1,0 +1,46 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller==6.6.0
+
+      - name: Build EXE with PyInstaller
+        run: |
+          pyinstaller --onefile --windowed --name AmazonLabelTool src/main.py
+
+      - name: Package release
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path release/AmazonLabelTool_v2.0 | Out-Null
+          Copy-Item dist/AmazonLabelTool.exe release/AmazonLabelTool_v2.0/
+          Copy-Item config.sample.json release/AmazonLabelTool_v2.0/config.json
+          Copy-Item README.md release/AmazonLabelTool_v2.0/
+          Compress-Archive -Path release/AmazonLabelTool_v2.0 -DestinationPath release/AmazonLabelTool_v2.0.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AmazonLabelTool-Windows
+          path: release/AmazonLabelTool_v2.0.zip
+          retention-days: 30
