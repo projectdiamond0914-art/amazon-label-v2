@@ -25,16 +25,16 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller==6.6.0
 
-      - name: Build EXE with PyInstaller
+      - name: Build EXE with PyInstaller (onedir)
         run: |
-          pyinstaller --onefile --windowed --name AmazonLabelTool src/main.py
+          pyinstaller --onedir --windowed --name AmazonLabelTool src/main.py
 
       - name: Package release
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path release/AmazonLabelTool_v2.0 | Out-Null
-          Copy-Item dist/AmazonLabelTool.exe release/AmazonLabelTool_v2.0/
-          Copy-Item config.sample.json release/AmazonLabelTool_v2.0/config.json
+          Copy-Item -Recurse dist/AmazonLabelTool/* release/AmazonLabelTool_v2.0/
+          Copy-Item config.production.json release/AmazonLabelTool_v2.0/config.json
           Copy-Item README.md release/AmazonLabelTool_v2.0/
           Compress-Archive -Path release/AmazonLabelTool_v2.0 -DestinationPath release/AmazonLabelTool_v2.0.zip
 
