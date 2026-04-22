@@ -6,6 +6,7 @@ __pycache__/
 dist/
 build/
 release/
+release_*/
 *.spec
 .DS_Store
 config.json
@@ -13,3 +14,6 @@ license.json
 fnsku_rules.json
 sample_data/*.pdf
 !sample_data/.gitkeep
+
+# Streamlit
+.streamlit/secrets.toml
