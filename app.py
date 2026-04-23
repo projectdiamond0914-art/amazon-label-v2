@@ -22,15 +22,36 @@ from io import BytesIO
 
 import streamlit as st
 from pypdf import PdfReader, PdfWriter
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfgen import canvas
 
 
 # ========== 設定 ==========
 APP_NAME = "Amazon商品ラベル FNSKU別テキスト挿入ツール"
 APP_VERSION = "2.0.0-web"
-FONT_NAME = "Helvetica"
+FONT_ASCII = "Helvetica"
+FONT_JP = "HeiseiKakuGo-W5"  # CID日本語フォント（ReportLab標準同梱）
 FONT_SIZE = 6
 RIGHT_OFFSET_PT = 5
+
+# 日本語フォントを起動時に1回だけ登録（多重登録防止）
+_JP_FONT_REGISTERED = False
+
+
+def _ensure_jp_font():
+    global _JP_FONT_REGISTERED
+    if not _JP_FONT_REGISTERED:
+        try:
+            pdfmetrics.registerFont(UnicodeCIDFont(FONT_JP))
+            _JP_FONT_REGISTERED = True
+        except Exception:
+            # 失敗しても Helvetica フォールバックで続行
+            pass
+
+
+def _contains_non_ascii(s: str) -> bool:
+    return any(ord(c) > 127 for c in s)
 
 # ライセンス検証用Googleスプレッドシート（CSV公開URL）
 # Streamlit Cloud では st.secrets["LICENSE_CSV_URL"] が優先される
@@ -178,25 +199,38 @@ def get_text_for_fnsku(
 
 
 def create_overlay(
-    width, height, label_items, font_name, font_size, right_offset
+    width, height, label_items, font_size, right_offset
 ) -> BytesIO:
-    """複数ラベルのテキストをオーバーレイ生成"""
+    """
+    複数ラベルのテキストをオーバーレイ生成。
+    挿入文字列がASCIIならHelvetica、非ASCII（日本語等）が含まれれば自動で
+    CID日本語フォントに切り替える。
+    """
+    _ensure_jp_font()
+
     buf = BytesIO()
     c = canvas.Canvas(buf, pagesize=(width, height))
-    c.setFont(font_name, font_size)
     c.setFillColorRGB(0, 0, 0)
 
     for item in label_items:
-        if not item.get("text"):
+        text = item.get("text")
+        if not text:
             continue
         sx, sy, sfs = item["shinpin_pos"]
         text_x = sx + (sfs * 2) + right_offset
         text_y = sy
-        c.drawString(text_x, text_y, item["text"])
+        font = FONT_JP if (_JP_FONT_REGISTERED and _contains_non_ascii(text)) else FONT_ASCII
+        c.setFont(font, font_size)
+        c.drawString(text_x, text_y, text)
 
     c.save()
     buf.seek(0)
     return buf
+
+
+class PDFProcessingError(Exception):
+    """ユーザー向けに分かりやすく説明できるPDF処理エラー"""
+    pass
 
 
 def process_pdf_bytes(
@@ -205,47 +239,99 @@ def process_pdf_bytes(
     """
     PDFをバイト列で受けて、処理後のPDFバイト列を返す。
     返り値: (output_bytes, ページ数, ラベル数, 検出FNSKU一覧)
-    """
-    reader = PdfReader(BytesIO(input_bytes))
-    writer = PdfWriter()
 
+    ユーザー向けに分かりやすいエラーを PDFProcessingError で投げる：
+      - 空ファイル
+      - 不正なPDF形式
+      - 暗号化（パスワード保護）PDF
+      - ページ0件のPDF
+    """
+    if not input_bytes:
+        raise PDFProcessingError("ファイルが空です。別のPDFをお試しください。")
+
+    # マジックナンバー簡易チェック
+    if not input_bytes.lstrip().startswith(b"%PDF-"):
+        raise PDFProcessingError(
+            "このファイルはPDF形式ではないようです。"
+            "Amazonからダウンロードしたラベル用PDFをアップロードしてください。"
+        )
+
+    try:
+        reader = PdfReader(BytesIO(input_bytes))
+    except Exception as e:
+        raise PDFProcessingError(
+            f"PDFを開けませんでした。ファイルが破損している可能性があります。（詳細: {e}）"
+        ) from e
+
+    # 暗号化PDF（パスワード保護）
+    if getattr(reader, "is_encrypted", False):
+        # 空パスワードで復号試行
+        try:
+            if reader.decrypt("") == 0:
+                raise PDFProcessingError(
+                    "このPDFはパスワード保護されています。"
+                    "保護を外してから再度アップロードしてください。"
+                )
+        except PDFProcessingError:
+            raise
+        except Exception:
+            raise PDFProcessingError(
+                "このPDFはパスワード保護されています。"
+                "保護を外してから再度アップロードしてください。"
+            )
+
+    if len(reader.pages) == 0:
+        raise PDFProcessingError("このPDFにはページがありません。別のファイルをお試しください。")
+
+    writer = PdfWriter()
     total_labels = 0
     detected_fnskus: set[str] = set()
 
-    for page in reader.pages:
-        media_box = page.mediabox
-        width = float(media_box.width)
-        height = float(media_box.height)
+    for page_idx, page in enumerate(reader.pages, start=1):
+        try:
+            media_box = page.mediabox
+            width = float(media_box.width)
+            height = float(media_box.height)
 
-        labels = find_labels_in_page(page)
-        total_labels += len(labels)
+            labels = find_labels_in_page(page)
+            total_labels += len(labels)
 
-        label_items = []
-        for lbl in labels:
-            if lbl["fnsku"]:
-                detected_fnskus.add(lbl["fnsku"])
-            text = get_text_for_fnsku(
-                lbl["fnsku"], rules, default_mode, default_extra
-            )
-            label_items.append({
-                "shinpin_pos": lbl["shinpin_pos"],
-                "text": text,
-            })
+            label_items = []
+            for lbl in labels:
+                if lbl["fnsku"]:
+                    detected_fnskus.add(lbl["fnsku"])
+                text = get_text_for_fnsku(
+                    lbl["fnsku"], rules, default_mode, default_extra
+                )
+                label_items.append({
+                    "shinpin_pos": lbl["shinpin_pos"],
+                    "text": text,
+                })
 
-        if label_items:
-            overlay_buf = create_overlay(
-                width, height, label_items,
-                FONT_NAME, FONT_SIZE, RIGHT_OFFSET_PT
-            )
-            overlay_reader = PdfReader(overlay_buf)
-            overlay_page = overlay_reader.pages[0]
-            page.merge_page(overlay_page)
+            if label_items:
+                overlay_buf = create_overlay(
+                    width, height, label_items,
+                    FONT_SIZE, RIGHT_OFFSET_PT
+                )
+                overlay_reader = PdfReader(overlay_buf)
+                overlay_page = overlay_reader.pages[0]
+                page.merge_page(overlay_page)
 
-        writer.add_page(page)
+            writer.add_page(page)
+        except Exception as e:
+            raise PDFProcessingError(
+                f"{page_idx}ページ目の処理中にエラーが発生しました。（詳細: {e}）"
+            ) from e
 
-    out_buf = BytesIO()
-    writer.write(out_buf)
-    out_buf.seek(0)
+    try:
+        out_buf = BytesIO()
+        writer.write(out_buf)
+        out_buf.seek(0)
+    except Exception as e:
+        raise PDFProcessingError(
+            f"処理結果の書き出し中にエラーが発生しました。（詳細: {e}）"
+        ) from e
+
     return out_buf.getvalue(), len(reader.pages), total_labels, detected_fnskus
 
 
@@ -421,20 +507,39 @@ def process_uploaded_files(uploaded_files, rules, default_mode, default_extra):
                 "error": None,
             })
             with log_area:
-                st.success(
-                    f"✅ {uploaded.name} — {num_pages}ページ / {num_labels}ラベル / {len(fnskus)}種類のFNSKU"
-                )
-        except Exception as e:
+                if num_labels == 0:
+                    st.warning(
+                        f"⚠️ {uploaded.name} — 処理は完了しましたが、"
+                        f"「新品」テキストが検出されませんでした"
+                        f"（{num_pages}ページ）。Amazonラベル形式のPDFかご確認ください。"
+                    )
+                else:
+                    st.success(
+                        f"✅ {uploaded.name} — {num_pages}ページ / {num_labels}ラベル / {len(fnskus)}種類のFNSKU"
+                    )
+        except PDFProcessingError as e:
+            # ユーザー向けメッセージがそのまま表示できる既知エラー
             results.append({
-                "name": uploaded.name,
-                "output": None,
-                "pages": 0,
-                "labels": 0,
-                "fnskus": set(),
-                "error": str(e),
+                "name": uploaded.name, "output": None, "pages": 0,
+                "labels": 0, "fnskus": set(), "error": str(e),
             })
             with log_area:
-                st.error(f"❌ {uploaded.name} — エラー: {e}")
+                st.error(f"❌ {uploaded.name} — {e}")
+        except Exception as e:
+            # 想定外エラーは詳細をトレースに残す
+            import traceback
+            tb = traceback.format_exc()
+            results.append({
+                "name": uploaded.name, "output": None, "pages": 0,
+                "labels": 0, "fnskus": set(), "error": str(e),
+            })
+            with log_area:
+                st.error(
+                    f"❌ {uploaded.name} — 予期しないエラーが発生しました。"
+                    "お手数ですが管理者にこのメッセージをスクリーンショットでお送りください。"
+                )
+                with st.expander("エラー詳細（管理者に共有してください）"):
+                    st.code(tb)
 
     progress.progress(1.0, text=f"完了：{total}件を処理しました。")
 
