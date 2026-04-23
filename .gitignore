@@ -13,7 +13,9 @@ config.json
 license.json
 fnsku_rules.json
 sample_data/*.pdf
+sample_data/*.png
 !sample_data/.gitkeep
+!sample_data/realistic_amazon_labels.pdf
 
 # Streamlit
 .streamlit/secrets.toml
