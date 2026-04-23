@@ -340,9 +340,24 @@ def process_pdf_bytes(
 def init_session_state():
     st.session_state.setdefault("licensed", False)
     st.session_state.setdefault("user_email", "")
+    # ライセンスキーは処理実行時の再検証に利用するためセッション内に保持
+    st.session_state.setdefault("license_key", "")
     st.session_state.setdefault("default_mode", MODE_CHINA_ONLY)
     st.session_state.setdefault("default_extra", "")
     st.session_state.setdefault("rules_json_text", '{"rules": {}}')
+
+
+def reverify_current_license() -> tuple[bool, str]:
+    """
+    セッションに保存されたメール/キーでライセンスを再検証する。
+    スプシ側で `有効` が `FALSE` に変更された場合や、行が削除された場合に
+    処理実行時点で検知するために使用する（exe版との挙動互換）。
+    """
+    email = st.session_state.get("user_email", "")
+    key = st.session_state.get("license_key", "")
+    if not email or not key:
+        return False, "ログイン情報が取得できません。再度ログインしてください。"
+    return verify_license_online(email, key, get_license_csv_url())
 
 
 def render_login():
@@ -379,6 +394,7 @@ def render_login():
         if ok:
             st.session_state["licensed"] = True
             st.session_state["user_email"] = email.strip()
+            st.session_state["license_key"] = license_key.strip()
             st.success("ログインに成功しました。")
             st.rerun()
         else:
@@ -393,6 +409,7 @@ def render_sidebar():
         if st.button("ログアウト", use_container_width=True):
             st.session_state["licensed"] = False
             st.session_state["user_email"] = ""
+            st.session_state["license_key"] = ""
             st.rerun()
 
         st.divider()
@@ -485,6 +502,22 @@ def render_processor():
 
 def process_uploaded_files(uploaded_files, rules, default_mode, default_extra):
     """アップロードされたPDFを順次処理して結果を表示"""
+    # 処理実行時のライセンス再検証（exe版との挙動互換）
+    # ログイン後にスプシ側でキーを停止された場合、ここで検知して処理を中断する
+    with st.spinner("ライセンスを確認中..."):
+        ok, err = reverify_current_license()
+    if not ok:
+        st.error(f"ライセンスが無効です：{err}")
+        st.warning("お手数ですが、再度ログインしてからお試しください。")
+        st.session_state["licensed"] = False
+        st.session_state["user_email"] = ""
+        st.session_state["license_key"] = ""
+        # 少し待ってからログイン画面へ（ユーザーがエラーメッセージを読めるように）
+        import time
+        time.sleep(3)
+        st.rerun()
+        return
+
     results = []
     progress = st.progress(0.0, text="処理を開始します...")
     log_area = st.container()
