@@ -12,6 +12,7 @@ localhost:8765 で起動中のStreamlitアプリに対して：
 起動は別プロセス（tests/_run_streamlit.sh）で行う前提。
 """
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -22,8 +23,10 @@ from playwright.sync_api import sync_playwright, expect
 
 URL = "http://localhost:8765"
 SAMPLE_PDF = Path(__file__).resolve().parent.parent / "sample_data" / "realistic_amazon_labels.pdf"
-TEST_EMAIL = "<MELTARO_EMAIL_REDACTED>"
-TEST_KEY = "<MELTARO_KEY_REDACTED>"
+# 実キーは環境変数で注入（~/amazon-label-v2-secrets/meltaro_credentials.txt 参照）
+# 例: TEST_EMAIL=xxx@example.com TEST_KEY=XXXX-XXXX python tests/test_e2e_playwright.py
+TEST_EMAIL = os.environ.get("TEST_EMAIL", "example@example.com")
+TEST_KEY = os.environ.get("TEST_KEY", "XXXXXXXX-XXXX-XXXX-XXXX")
 
 
 def run_e2e():

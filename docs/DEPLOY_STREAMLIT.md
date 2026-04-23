@@ -60,8 +60,8 @@
 1. デプロイURLにアクセス
 2. ログイン画面が表示されることを確認
 3. 以下でログイン：
-   - メール: `<MELTARO_EMAIL_REDACTED>`
-   - キー: `<MELTARO_KEY_REDACTED>`
+   - メール: ＜メル太郎様の既存メール（secrets/meltaro_credentials.txt 参照）＞
+   - キー: ＜メル太郎様の既存キー（同上）＞
 4. 処理画面が表示されたら、以下のサンプルPDFをアップロード：
    - `sample_data/realistic_amazon_labels.pdf`（既にGitHubに含まれる）
    - または加藤氏手持ちのAmazon実ラベルPDF
