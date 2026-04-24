@@ -968,15 +968,13 @@ def main():
         render_login()
         return
 
-    # ログイン後は毎回のrerunで再検証（10秒キャッシュ、ただし処理実行時は強制fresh）
-    ok, err = reverify_current_license(force_fresh=False)
-    if not ok:
-        st.error(f"ライセンスが無効化されました：{err}")
-        st.warning("再度ログインしてください。ログイン画面へ戻ります。")
-        _clear_session_on_license_fail()
-        time.sleep(2)
-        st.rerun()
-        return
+    # 【重要】メインビュー描画時のライセンス再検証は行わない。
+    # ここで毎レンダー reverify_current_license を呼ぶと、キャッシュTTL切れのたびに
+    # Google Sheets への HTTP fetch が走り、network I/O 中の postMessage が
+    # Streamlit の rerun を誘発する。結果、data_editor で入力中の文字が消える
+    # 現象が発生していた。
+    # ライセンス再検証は「PDFを処理するボタン押下時」「ダウンロード時」に限定する
+    # （当初仕様通り）。ログイン中に管理者が無効化した場合は、次の処理実行時に弾かれる。
 
     # 設定の初回ロード
     _load_settings_if_needed(ls)
