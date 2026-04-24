@@ -522,6 +522,12 @@ def render_sidebar(ls: LocalStorage):
         st.markdown(f"**バージョン**: {APP_VERSION}")
         st.markdown(f"**ログイン中**: {st.session_state['user_email']}")
         if st.button("ログアウト", use_container_width=True):
+            # ログアウト時に現在の設定を保存してから、セッションを破棄する
+            # （プロセス終了直前なので rerun による入力ロスの心配がない）
+            try:
+                _persist_current_settings(ls, silent=True)
+            except Exception:
+                pass
             _clear_session_on_license_fail()
             st.rerun()
 
@@ -648,17 +654,21 @@ def render_processor(ls: LocalStorage):
                 ])
                 st.dataframe(preview_df, use_container_width=True, hide_index=True)
 
-    # 設定を保存ボタン（自動保存もするが、明示的に押せるように）
+    # 設定を保存ボタン（明示的な保存のみ。自動保存は行わない）
+    # 理由：毎描画ごとに localStorage へ書き込むと rerun が発生し、
+    # 表（data_editor）への入力が 1 回で反映されない症状が出るため、
+    # 保存は「明示的なタイミング」に限定する。
     col_save, col_info = st.columns([1, 3])
     with col_save:
-        if st.button("💾 設定を保存", type="secondary", use_container_width=True):
+        if st.button("💾 設定を保存", type="primary", use_container_width=True):
             _persist_current_settings(ls)
             st.toast("設定をブラウザに保存しました。", icon="✅")
     with col_info:
-        st.caption("※ 設定を変更すると自動的に保存されますが、明示的にボタンを押しても保存できます。")
-
-    # 毎回の描画で変更を自動保存（session_state vs 保存済みJSONの差分があれば保存）
-    _persist_current_settings(ls, silent=True)
+        st.caption(
+            "※ 表・チェック・追加テキストを変更したら、"
+            "この「💾 設定を保存」ボタンを押してください。"
+            "「▶️ PDFを処理する」を押したときと「ログアウト」のときも自動で保存します。"
+        )
 
     # ========== ② PDFアップロード ==========
     st.markdown("## ② PDFをアップロード")
@@ -687,6 +697,10 @@ def render_processor(ls: LocalStorage):
             time.sleep(2)
             st.rerun()
             return
+
+        # 処理を開始する直前に現在の設定を localStorage に保存しておく。
+        # （実行＝設定が確定したタイミングとみなして安全に書き込む）
+        _persist_current_settings(ls, silent=True)
 
         rules, default_mode, default_extra_clean = ui_settings_to_rules(
             st.session_state["default_mic"],
@@ -919,6 +933,30 @@ def main():
         page_title=APP_NAME,
         page_icon="📦",
         layout="wide",
+    )
+
+    # Streamlit Cloud の右上ツールバー（Share/Fork/GitHub/⋮）を非表示にする。
+    # これらはアプリ開発者の GitHub プロフィール等に遷移するボタンで、
+    # 業務利用のエンドユーザーには不要なため隠す。
+    st.markdown(
+        """
+        <style>
+        /* Streamlit Cloud が埋め込む外側ツールバー（Share, Fork, GitHub, ⋮ など）を隠す */
+        [data-testid="stToolbar"] { display: none !important; }
+        [data-testid="stDecoration"] { display: none !important; }
+        [data-testid="stStatusWidget"] { display: none !important; }
+        .stDeployButton { display: none !important; }
+        .viewerBadge_container__r5tak { display: none !important; }
+        a[href*="streamlit.io/cloud"] { display: none !important; }
+        a[href*="share.streamlit.io"] { display: none !important; }
+        /* ヘッダー右上にあるメニュー系（Fork/GitHubアイコン） */
+        header [data-testid="stHeader"] button,
+        header button[kind="header"] { display: none !important; }
+        #MainMenu { visibility: hidden !important; }
+        footer { visibility: hidden !important; }
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
 
     init_session_state()
