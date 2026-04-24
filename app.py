@@ -3,9 +3,10 @@ Amazon商品ラベル FNSKU別テキスト挿入ツール v2.0 — Web版（Stre
 
 機能:
 - PDF内の「新品」テキスト右横にカスタムテキストを挿入
-- FNSKUごとに3モード切替（Made in China / + 追加文言 / 追加文言のみ）
-- ライセンスキー制（Googleスプレッドシート連携）
+- FNSKUごとに個別ルールを設定（表形式UI）
+- ライセンスキー制（Googleスプレッドシート連携 + 都度再検証）
 - 複数PDF一括処理・ZIP一括ダウンロード対応
+- 設定のブラウザ永続保存（localStorage）
 """
 
 from __future__ import annotations
@@ -14,26 +15,33 @@ import csv
 import io
 import json
 import re
+import time
 import urllib.error
 import urllib.request
 import zipfile
 from datetime import datetime
 from io import BytesIO
 
+import pandas as pd
 import streamlit as st
 from pypdf import PdfReader, PdfWriter
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfgen import canvas
+from streamlit_local_storage import LocalStorage
 
 
 # ========== 設定 ==========
 APP_NAME = "Amazon商品ラベル FNSKU別テキスト挿入ツール"
-APP_VERSION = "2.0.0-web"
+APP_VERSION = "2.1.0-web"
 FONT_ASCII = "Helvetica"
 FONT_JP = "HeiseiKakuGo-W5"  # CID日本語フォント（ReportLab標準同梱）
 FONT_SIZE = 6
 RIGHT_OFFSET_PT = 5
+
+# ライセンス再検証のキャッシュ有効期間（秒）
+# 処理実行時は強制的に最新を取得するためTTLを無視する
+VERIFY_CACHE_TTL_SEC = 10
 
 # 日本語フォントを起動時に1回だけ登録（多重登録防止）
 _JP_FONT_REGISTERED = False
@@ -53,8 +61,8 @@ def _ensure_jp_font():
 def _contains_non_ascii(s: str) -> bool:
     return any(ord(c) > 127 for c in s)
 
+
 # ライセンス検証用Googleスプレッドシート（CSV公開URL）
-# Streamlit Cloud では st.secrets["LICENSE_CSV_URL"] が優先される
 DEFAULT_LICENSE_CSV_URL = (
     "https://docs.google.com/spreadsheets/d/"
     "1bLl13Hzeygikzs-yGiLqFV1L6Ne27F3QGB3rsoy6A7U/export?format=csv&gid=1754325196"
@@ -63,26 +71,24 @@ DEFAULT_LICENSE_CSV_URL = (
 # FNSKU: X + 9文字の英数字（Amazon標準）
 FNSKU_PATTERN = re.compile(r"\bX[A-Z0-9]{9}\b")
 
-# モード定義
+# モード定義（内部処理用）
 MODE_CHINA_ONLY = "china_only"
 MODE_CHINA_WITH_EXTRA = "china_with_extra"
 MODE_EXTRA_ONLY = "extra_only"
-
-MODE_LABELS = {
-    MODE_CHINA_ONLY: "Made in China のみ",
-    MODE_CHINA_WITH_EXTRA: "Made in China + 追加文言",
-    MODE_EXTRA_ONLY: "追加文言のみ（Made in Chinaなし）",
-}
+MODE_NONE = "none"  # 何も挿入しない
 
 
 # ========== ライセンス検証 ==========
 
 def get_license_csv_url() -> str:
-    """Streamlit secrets または定数からCSV URLを取得"""
+    """Streamlit secrets または定数からCSV URLを取得（キャッシュバスティング付き）"""
     try:
-        return st.secrets.get("LICENSE_CSV_URL", DEFAULT_LICENSE_CSV_URL)
+        base = st.secrets.get("LICENSE_CSV_URL", DEFAULT_LICENSE_CSV_URL)
     except Exception:
-        return DEFAULT_LICENSE_CSV_URL
+        base = DEFAULT_LICENSE_CSV_URL
+    # 中間CDNの念のための対策：毎回ユニークなパラメータを付与
+    sep = "&" if "?" in base else "?"
+    return f"{base}{sep}_cb={int(time.time() * 1000)}"
 
 
 def verify_license_online(email: str, license_key: str, csv_url: str) -> tuple[bool, str]:
@@ -95,7 +101,12 @@ def verify_license_online(email: str, license_key: str, csv_url: str) -> tuple[b
 
     try:
         req = urllib.request.Request(
-            csv_url, headers={"User-Agent": "AmazonLabelTool/2.0-web"}
+            csv_url,
+            headers={
+                "User-Agent": "AmazonLabelTool/2.1-web",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+            },
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             raw = resp.read().decode("utf-8")
@@ -138,6 +149,43 @@ def verify_license_online(email: str, license_key: str, csv_url: str) -> tuple[b
                 return False, "ライセンスが停止されています。管理者にお問い合わせください。"
 
     return False, "メールアドレスが登録されていません。"
+
+
+def reverify_current_license(force_fresh: bool = False) -> tuple[bool, str]:
+    """
+    セッションに保存されたメール/キーでライセンスを再検証する。
+    force_fresh=True の場合はキャッシュを無視して必ずAPIを叩く（処理実行時用）。
+    それ以外は VERIFY_CACHE_TTL_SEC 秒間キャッシュを使う（UI描画時用）。
+    """
+    email = st.session_state.get("user_email", "")
+    key = st.session_state.get("license_key", "")
+    if not email or not key:
+        return False, "ログイン情報が取得できません。再度ログインしてください。"
+
+    now = time.time()
+    last_at = st.session_state.get("_verify_last_at", 0.0)
+    last_result = st.session_state.get("_verify_last_result")
+
+    if (
+        not force_fresh
+        and last_result is not None
+        and (now - last_at) < VERIFY_CACHE_TTL_SEC
+    ):
+        return last_result
+
+    result = verify_license_online(email, key, get_license_csv_url())
+    st.session_state["_verify_last_at"] = now
+    st.session_state["_verify_last_result"] = result
+    return result
+
+
+def _clear_session_on_license_fail():
+    """ライセンス失効時のセッションクリア共通処理"""
+    st.session_state["licensed"] = False
+    st.session_state["user_email"] = ""
+    st.session_state["license_key"] = ""
+    st.session_state.pop("_verify_last_at", None)
+    st.session_state.pop("_verify_last_result", None)
 
 
 # ========== PDF処理 ==========
@@ -195,6 +243,8 @@ def get_text_for_fnsku(
         return f"Made in China {extra}".strip() if extra else "Made in China"
     elif mode == MODE_EXTRA_ONLY:
         return extra
+    elif mode == MODE_NONE:
+        return ""
     return ""
 
 
@@ -239,17 +289,10 @@ def process_pdf_bytes(
     """
     PDFをバイト列で受けて、処理後のPDFバイト列を返す。
     返り値: (output_bytes, ページ数, ラベル数, 検出FNSKU一覧)
-
-    ユーザー向けに分かりやすいエラーを PDFProcessingError で投げる：
-      - 空ファイル
-      - 不正なPDF形式
-      - 暗号化（パスワード保護）PDF
-      - ページ0件のPDF
     """
     if not input_bytes:
         raise PDFProcessingError("ファイルが空です。別のPDFをお試しください。")
 
-    # マジックナンバー簡易チェック
     if not input_bytes.lstrip().startswith(b"%PDF-"):
         raise PDFProcessingError(
             "このファイルはPDF形式ではないようです。"
@@ -263,9 +306,7 @@ def process_pdf_bytes(
             f"PDFを開けませんでした。ファイルが破損している可能性があります。（詳細: {e}）"
         ) from e
 
-    # 暗号化PDF（パスワード保護）
     if getattr(reader, "is_encrypted", False):
-        # 空パスワードで復号試行
         try:
             if reader.decrypt("") == 0:
                 raise PDFProcessingError(
@@ -335,29 +376,99 @@ def process_pdf_bytes(
     return out_buf.getvalue(), len(reader.pages), total_labels, detected_fnskus
 
 
+# ========== 設定変換 ==========
+
+def ui_settings_to_rules(
+    default_mic: bool, default_extra: str, fnsku_rows: list[dict]
+) -> tuple[dict, str, str]:
+    """
+    新UIの状態（MIC checkbox + 追加テキスト + 表）を
+    既存 process_pdf_bytes が使う (rules, default_mode, default_extra) に変換する。
+
+    - MIC ON + 追加空 → "Made in China" のみ（china_only）
+    - MIC ON + 追加あり → "Made in China [追加]"（china_with_extra）
+    - MIC OFF + 追加あり → "[追加]" のみ（extra_only）
+    - MIC OFF + 追加空 → 何も挿入しない（none）
+    """
+    def pick_mode(mic: bool, extra: str) -> str:
+        extra = (extra or "").strip()
+        if mic and extra:
+            return MODE_CHINA_WITH_EXTRA
+        if mic and not extra:
+            return MODE_CHINA_ONLY
+        if not mic and extra:
+            return MODE_EXTRA_ONLY
+        return MODE_NONE
+
+    default_mode = pick_mode(default_mic, default_extra)
+    default_extra_clean = (default_extra or "").strip()
+
+    rules = {"rules": {}}
+    for row in fnsku_rows or []:
+        fnsku = (row.get("fnsku") or "").strip().upper()
+        if not fnsku:
+            continue
+        mic = bool(row.get("mic", True))
+        extra = (row.get("extra") or "").strip()
+        mode = pick_mode(mic, extra)
+        rules["rules"][fnsku] = {"mode": mode, "extra_text": extra}
+
+    return rules, default_mode, default_extra_clean
+
+
+# ========== 永続化（localStorage） ==========
+
+SETTINGS_KEY_PREFIX = "amazon_label_v2_settings_"
+
+
+def _settings_key_for(email: str) -> str:
+    """メール毎に別名で localStorage に保存"""
+    safe = re.sub(r"[^a-zA-Z0-9_.-]", "_", email or "anon")
+    return f"{SETTINGS_KEY_PREFIX}{safe}"
+
+
+def load_settings_from_storage(ls: LocalStorage, email: str) -> dict | None:
+    """localStorage から設定を読み込む（無ければ None）"""
+    try:
+        raw = ls.getItem(_settings_key_for(email))
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def save_settings_to_storage(ls: LocalStorage, email: str, data: dict):
+    """localStorage に設定を保存"""
+    try:
+        ls.setItem(_settings_key_for(email), json.dumps(data, ensure_ascii=False))
+    except Exception:
+        pass
+
+
+def clear_settings_from_storage(ls: LocalStorage, email: str):
+    """localStorage から設定を削除"""
+    try:
+        ls.deleteItem(_settings_key_for(email))
+    except Exception:
+        pass
+
+
 # ========== Streamlit UI ==========
 
 def init_session_state():
     st.session_state.setdefault("licensed", False)
     st.session_state.setdefault("user_email", "")
-    # ライセンスキーは処理実行時の再検証に利用するためセッション内に保持
     st.session_state.setdefault("license_key", "")
-    st.session_state.setdefault("default_mode", MODE_CHINA_ONLY)
+    st.session_state.setdefault("default_mic", True)
     st.session_state.setdefault("default_extra", "")
-    st.session_state.setdefault("rules_json_text", '{"rules": {}}')
-
-
-def reverify_current_license() -> tuple[bool, str]:
-    """
-    セッションに保存されたメール/キーでライセンスを再検証する。
-    スプシ側で `有効` が `FALSE` に変更された場合や、行が削除された場合に
-    処理実行時点で検知するために使用する（exe版との挙動互換）。
-    """
-    email = st.session_state.get("user_email", "")
-    key = st.session_state.get("license_key", "")
-    if not email or not key:
-        return False, "ログイン情報が取得できません。再度ログインしてください。"
-    return verify_license_online(email, key, get_license_csv_url())
+    # fnsku_rows: [{"fnsku": str, "mic": bool, "extra": str}, ...]
+    st.session_state.setdefault("fnsku_rows", [])
+    st.session_state.setdefault("_settings_loaded", False)
+    st.session_state.setdefault("processed_results", None)
 
 
 def render_login():
@@ -395,75 +506,162 @@ def render_login():
             st.session_state["licensed"] = True
             st.session_state["user_email"] = email.strip()
             st.session_state["license_key"] = license_key.strip()
+            st.session_state["_verify_last_at"] = time.time()
+            st.session_state["_verify_last_result"] = (True, "")
+            # 次のrerunで設定読み込みが走る
+            st.session_state["_settings_loaded"] = False
             st.success("ログインに成功しました。")
             st.rerun()
         else:
             st.error(f"ログインに失敗しました：{err}")
 
 
-def render_sidebar():
-    """サイドバー：設定とログアウト"""
+def render_sidebar(ls: LocalStorage):
+    """サイドバー：ログイン情報とログアウト、バージョン"""
     with st.sidebar:
         st.markdown(f"**バージョン**: {APP_VERSION}")
         st.markdown(f"**ログイン中**: {st.session_state['user_email']}")
         if st.button("ログアウト", use_container_width=True):
-            st.session_state["licensed"] = False
-            st.session_state["user_email"] = ""
-            st.session_state["license_key"] = ""
+            _clear_session_on_license_fail()
             st.rerun()
 
         st.divider()
-        st.subheader("⚙️ デフォルト設定")
-
-        mode_label_to_key = {v: k for k, v in MODE_LABELS.items()}
-        current_label = MODE_LABELS[st.session_state["default_mode"]]
-        selected_label = st.radio(
-            "挿入モード",
-            options=list(MODE_LABELS.values()),
-            index=list(MODE_LABELS.values()).index(current_label),
-            help="FNSKU個別ルールがないラベルに適用されるモード",
+        st.caption(
+            "💾 設定はこのブラウザに自動保存されます。"
+            "同じブラウザで再ログインすれば前回の設定が復元されます。"
         )
-        st.session_state["default_mode"] = mode_label_to_key[selected_label]
 
-        if st.session_state["default_mode"] in (MODE_CHINA_WITH_EXTRA, MODE_EXTRA_ONLY):
-            st.session_state["default_extra"] = st.text_input(
-                "追加文言",
-                value=st.session_state["default_extra"],
-                placeholder="例: Imported by XYZ",
-            )
-        else:
+        if st.button("🗑️ 保存された設定をクリア", use_container_width=True, help="このブラウザの保存データを削除して初期化します"):
+            clear_settings_from_storage(ls, st.session_state["user_email"])
+            st.session_state["default_mic"] = True
             st.session_state["default_extra"] = ""
-
-        with st.expander("🧩 FNSKU個別ルール（上級者向け）"):
-            st.caption(
-                "特定のFNSKUのみ別モード・別文言を適用したい場合に設定。"
-                "JSON形式で編集してください。"
-            )
-            st.session_state["rules_json_text"] = st.text_area(
-                "ルールJSON",
-                value=st.session_state["rules_json_text"],
-                height=160,
-                help=(
-                    '例: {"rules": {"X01ABCDEFG": '
-                    '{"mode": "china_with_extra", "extra_text": "by ABC"}}}'
-                ),
-            )
-            try:
-                json.loads(st.session_state["rules_json_text"])
-                st.success("JSON形式は正しいです。")
-            except json.JSONDecodeError as e:
-                st.error(f"JSONエラー: {e}")
+            st.session_state["fnsku_rows"] = []
+            st.success("保存された設定をクリアしました。")
+            st.rerun()
 
 
-def render_processor():
+def render_processor(ls: LocalStorage):
     """PDF処理メイン画面"""
-    st.title("📦 Amazon商品ラベル FNSKU別テキスト挿入ツール")
+    st.title(f"📦 {APP_NAME}")
     st.caption(
         "「新品」の右横に「Made in China」や任意の文言を一括挿入します。"
         "複数PDFの同時処理にも対応。"
     )
 
-    st.markdown("### ① PDFをアップロード")
+    # ========== ① 挿入設定 ==========
+    st.markdown("## ① 挿入設定")
+
+    with st.container(border=True):
+        st.markdown("**デフォルト設定**（FNSKU別の個別設定がないラベルに適用されます）")
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            default_mic = st.checkbox(
+                '"Made in China" を入れる',
+                value=st.session_state["default_mic"],
+                key="default_mic_cb",
+                help="オンにすると、対象ラベルに「Made in China」が挿入されます",
+            )
+        with col2:
+            default_extra = st.text_input(
+                "追加テキスト（任意）",
+                value=st.session_state["default_extra"],
+                key="default_extra_ti",
+                placeholder="例: iPhone15用 / Imported by XYZ 等",
+                help='「Made in China」の後ろに続けて挿入されます。空欄なら「Made in China」のみ',
+            )
+        # session_state に反映
+        st.session_state["default_mic"] = default_mic
+        st.session_state["default_extra"] = default_extra
+
+        # プレビュー
+        _preview = _preview_text(default_mic, default_extra)
+        if _preview:
+            st.success(f"デフォルトで挿入される文言: **{_preview}**")
+        else:
+            st.info("デフォルトでは何も挿入されません（チェックも追加テキストも空）")
+
+    with st.container(border=True):
+        st.markdown("**FNSKU別の個別設定**（特定のFNSKUだけ別の文言にしたい場合）")
+        st.caption(
+            "表に FNSKU・チェック・追加テキストを直接入力してください。"
+            "行の追加は表の最下段の「+」から、削除は行左端のチェックで選択 → キーボードの Delete で可能です。"
+        )
+
+        # 表示用にDataFrameを作る
+        rows = st.session_state["fnsku_rows"] or []
+        if rows:
+            df = pd.DataFrame(rows)
+        else:
+            df = pd.DataFrame({"fnsku": pd.Series(dtype=str), "mic": pd.Series(dtype=bool), "extra": pd.Series(dtype=str)})
+
+        # カラムが欠けている場合の補完（旧データとの互換）
+        for col, default in [("fnsku", ""), ("mic", True), ("extra", "")]:
+            if col not in df.columns:
+                df[col] = default
+        df = df[["fnsku", "mic", "extra"]]
+
+        edited = st.data_editor(
+            df,
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "fnsku": st.column_config.TextColumn(
+                    "FNSKU",
+                    required=False,
+                    width="medium",
+                    help="Amazon FNSKU（X + 英数字9文字）",
+                ),
+                "mic": st.column_config.CheckboxColumn(
+                    '"Made in China" を入れる',
+                    default=True,
+                    width="small",
+                ),
+                "extra": st.column_config.TextColumn(
+                    "追加テキスト",
+                    default="",
+                    width="large",
+                    help='空欄ならチェック通りの動作（"Made in China"のみ等）',
+                ),
+            },
+            key="fnsku_editor",
+        )
+        # DataFrame → list of dicts に戻す
+        new_rows = edited.to_dict("records")
+        # NaN / None を空文字に正規化
+        for r in new_rows:
+            r["fnsku"] = (r.get("fnsku") or "").strip() if isinstance(r.get("fnsku"), str) else ""
+            r["extra"] = (r.get("extra") or "").strip() if isinstance(r.get("extra"), str) else ""
+            r["mic"] = bool(r.get("mic")) if r.get("mic") is not None else True
+        st.session_state["fnsku_rows"] = new_rows
+
+        # FNSKU別プレビュー
+        non_empty_rows = [r for r in new_rows if r["fnsku"]]
+        if non_empty_rows:
+            with st.expander(f"📋 FNSKU別の挿入内容プレビュー（{len(non_empty_rows)}件）"):
+                preview_df = pd.DataFrame([
+                    {
+                        "FNSKU": r["fnsku"],
+                        "挿入される文言": _preview_text(r["mic"], r["extra"]) or "（何も挿入しない）",
+                    }
+                    for r in non_empty_rows
+                ])
+                st.dataframe(preview_df, use_container_width=True, hide_index=True)
+
+    # 設定を保存ボタン（自動保存もするが、明示的に押せるように）
+    col_save, col_info = st.columns([1, 3])
+    with col_save:
+        if st.button("💾 設定を保存", type="secondary", use_container_width=True):
+            _persist_current_settings(ls)
+            st.toast("設定をブラウザに保存しました。", icon="✅")
+    with col_info:
+        st.caption("※ 設定を変更すると自動的に保存されますが、明示的にボタンを押しても保存できます。")
+
+    # 毎回の描画で変更を自動保存（session_state vs 保存済みJSONの差分があれば保存）
+    _persist_current_settings(ls, silent=True)
+
+    # ========== ② PDFアップロード ==========
+    st.markdown("## ② PDFをアップロード")
     uploaded_files = st.file_uploader(
         "PDFファイルを選択（複数可・ドラッグ&ドロップOK）",
         type=["pdf"],
@@ -476,48 +674,87 @@ def render_processor():
 
     st.markdown(f"**{len(uploaded_files)}件** のPDFがアップロードされました。")
 
-    # ルールJSONパース
-    try:
-        rules = json.loads(st.session_state["rules_json_text"])
-    except json.JSONDecodeError:
-        st.warning("FNSKU個別ルールのJSONが不正なため、デフォルト設定のみで処理します。")
-        rules = {"rules": {}}
-
-    default_mode = st.session_state["default_mode"]
-    default_extra = st.session_state["default_extra"]
-
-    st.markdown("### ② 現在の挿入設定")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown(f"- **モード**: {MODE_LABELS[default_mode]}")
-    with col2:
-        st.markdown(
-            f"- **追加文言**: `{default_extra}`" if default_extra else "- **追加文言**: （なし）"
-        )
-
-    st.markdown("### ③ 実行")
+    # ========== ③ 実行 ==========
+    st.markdown("## ③ 実行")
     if st.button("▶️ PDFを処理する", type="primary", use_container_width=True):
-        process_uploaded_files(uploaded_files, rules, default_mode, default_extra)
+        # 処理実行時は必ず最新のライセンス状態を取得（キャッシュ無視）
+        with st.spinner("ライセンスを確認中..."):
+            ok, err = reverify_current_license(force_fresh=True)
+        if not ok:
+            st.error(f"ライセンスが無効です：{err}")
+            st.warning("再度ログインしてください。ログイン画面へ戻ります。")
+            _clear_session_on_license_fail()
+            time.sleep(2)
+            st.rerun()
+            return
+
+        rules, default_mode, default_extra_clean = ui_settings_to_rules(
+            st.session_state["default_mic"],
+            st.session_state["default_extra"],
+            st.session_state["fnsku_rows"],
+        )
+        process_uploaded_files(uploaded_files, rules, default_mode, default_extra_clean)
+
+    # 前回処理結果があれば表示（rerunで消えないように session_state に保存）
+    if st.session_state.get("processed_results"):
+        render_results(st.session_state["processed_results"])
+
+
+def _preview_text(mic: bool, extra: str) -> str:
+    """UI設定から実際に挿入される文言のプレビューを返す"""
+    extra = (extra or "").strip()
+    if mic and extra:
+        return f"Made in China {extra}"
+    if mic and not extra:
+        return "Made in China"
+    if not mic and extra:
+        return extra
+    return ""
+
+
+def _persist_current_settings(ls: LocalStorage, silent: bool = False):
+    """現在の UI state を localStorage に保存"""
+    data = {
+        "default_mic": bool(st.session_state.get("default_mic", True)),
+        "default_extra": st.session_state.get("default_extra", "") or "",
+        "fnsku_rows": st.session_state.get("fnsku_rows", []) or [],
+        "saved_at": datetime.now().isoformat(),
+        "version": APP_VERSION,
+    }
+    save_settings_to_storage(ls, st.session_state["user_email"], data)
+    if not silent:
+        return True
+    return True
+
+
+def _load_settings_if_needed(ls: LocalStorage):
+    """ログイン直後に一度だけ localStorage から設定を復元"""
+    if st.session_state.get("_settings_loaded"):
+        return
+    email = st.session_state.get("user_email", "")
+    if not email:
+        return
+    data = load_settings_from_storage(ls, email)
+    if data:
+        st.session_state["default_mic"] = bool(data.get("default_mic", True))
+        st.session_state["default_extra"] = data.get("default_extra", "") or ""
+        rows = data.get("fnsku_rows") or []
+        # 正規化
+        clean_rows = []
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            clean_rows.append({
+                "fnsku": str(r.get("fnsku") or "").strip(),
+                "mic": bool(r.get("mic", True)),
+                "extra": str(r.get("extra") or "").strip(),
+            })
+        st.session_state["fnsku_rows"] = clean_rows
+    st.session_state["_settings_loaded"] = True
 
 
 def process_uploaded_files(uploaded_files, rules, default_mode, default_extra):
     """アップロードされたPDFを順次処理して結果を表示"""
-    # 処理実行時のライセンス再検証（exe版との挙動互換）
-    # ログイン後にスプシ側でキーを停止された場合、ここで検知して処理を中断する
-    with st.spinner("ライセンスを確認中..."):
-        ok, err = reverify_current_license()
-    if not ok:
-        st.error(f"ライセンスが無効です：{err}")
-        st.warning("お手数ですが、再度ログインしてからお試しください。")
-        st.session_state["licensed"] = False
-        st.session_state["user_email"] = ""
-        st.session_state["license_key"] = ""
-        # 少し待ってからログイン画面へ（ユーザーがエラーメッセージを読めるように）
-        import time
-        time.sleep(3)
-        st.rerun()
-        return
-
     results = []
     progress = st.progress(0.0, text="処理を開始します...")
     log_area = st.container()
@@ -551,7 +788,6 @@ def process_uploaded_files(uploaded_files, rules, default_mode, default_extra):
                         f"✅ {uploaded.name} — {num_pages}ページ / {num_labels}ラベル / {len(fnskus)}種類のFNSKU"
                     )
         except PDFProcessingError as e:
-            # ユーザー向けメッセージがそのまま表示できる既知エラー
             results.append({
                 "name": uploaded.name, "output": None, "pages": 0,
                 "labels": 0, "fnskus": set(), "error": str(e),
@@ -559,7 +795,6 @@ def process_uploaded_files(uploaded_files, rules, default_mode, default_extra):
             with log_area:
                 st.error(f"❌ {uploaded.name} — {e}")
         except Exception as e:
-            # 想定外エラーは詳細をトレースに残す
             import traceback
             tb = traceback.format_exc()
             results.append({
@@ -576,17 +811,36 @@ def process_uploaded_files(uploaded_files, rules, default_mode, default_extra):
 
     progress.progress(1.0, text=f"完了：{total}件を処理しました。")
 
-    render_results(results)
+    # set → list に変換して保存（setはJSONに載らないため）
+    saveable_results = []
+    for r in results:
+        r_copy = dict(r)
+        r_copy["fnskus"] = sorted(list(r["fnskus"])) if r["fnskus"] else []
+        saveable_results.append(r_copy)
+    st.session_state["processed_results"] = saveable_results
+    # NOTE: render_results はこの直後に main() 側の「前回処理結果」ブロックで呼ばれる。
+    # ここで呼ぶと同じ download_button を二重に描画して DuplicateWidgetID になるため、
+    # 意図的に呼び出さない。
 
 
 def render_results(results):
     """処理結果のダウンロードUI"""
+    # ダウンロード表示前に再検証（処理後にライセンス停止された場合を検知）
+    ok, err = reverify_current_license(force_fresh=False)
+    if not ok:
+        st.error(f"ライセンスが無効化されたため、ダウンロードを停止します：{err}")
+        st.session_state["processed_results"] = None
+        _clear_session_on_license_fail()
+        time.sleep(2)
+        st.rerun()
+        return
+
     success_results = [r for r in results if r["output"] is not None]
     if not success_results:
         st.warning("正常に処理できたファイルはありませんでした。")
         return
 
-    st.markdown("### ④ ダウンロード")
+    st.markdown("## ④ ダウンロード")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -601,6 +855,7 @@ def render_results(results):
             mime="application/pdf",
             type="primary",
             use_container_width=True,
+            key=f"dl_single_{out_name}",
         )
         _render_fnsku_detail(r)
         return
@@ -619,6 +874,7 @@ def render_results(results):
         mime="application/zip",
         type="primary",
         use_container_width=True,
+        key=f"dl_zip_{timestamp}",
     )
 
     with st.expander("個別にダウンロードする"):
@@ -632,7 +888,6 @@ def render_results(results):
                 key=f"dl_{out_name}",
             )
 
-    # FNSKU詳細
     with st.expander("検出FNSKU一覧"):
         for r in success_results:
             _render_fnsku_detail(r)
@@ -663,16 +918,33 @@ def main():
     st.set_page_config(
         page_title=APP_NAME,
         page_icon="📦",
-        layout="centered",
+        layout="wide",
     )
 
     init_session_state()
 
+    # LocalStorage インスタンス（毎回生成、コストは低い）
+    ls = LocalStorage()
+
     if not st.session_state["licensed"]:
         render_login()
-    else:
-        render_sidebar()
-        render_processor()
+        return
+
+    # ログイン後は毎回のrerunで再検証（10秒キャッシュ、ただし処理実行時は強制fresh）
+    ok, err = reverify_current_license(force_fresh=False)
+    if not ok:
+        st.error(f"ライセンスが無効化されました：{err}")
+        st.warning("再度ログインしてください。ログイン画面へ戻ります。")
+        _clear_session_on_license_fail()
+        time.sleep(2)
+        st.rerun()
+        return
+
+    # 設定の初回ロード
+    _load_settings_if_needed(ls)
+
+    render_sidebar(ls)
+    render_processor(ls)
 
 
 if __name__ == "__main__":
