@@ -584,6 +584,13 @@ def render_processor(ls: LocalStorage):
             "表に FNSKU・チェック・追加テキストを直接入力してください。"
             "行の追加は表の最下段の「+」から、削除は行左端のチェックで選択 → キーボードの Delete で可能です。"
         )
+        st.info(
+            "💡 **入力後の確定操作について**　"
+            "セルに値を入力したら、**必ず「Enterキー」または「Tabキー」を押して確定**してから、"
+            "下の「💾 設定を保存」ボタンを押してください。"
+            "確定前に保存ボタンを押すと、入力途中の文字が反映されないことがあります。",
+            icon="✏️",
+        )
 
         # 表示用にDataFrameを作る
         rows = st.session_state["fnsku_rows"] or []
@@ -941,9 +948,10 @@ def main():
         .viewerBadge_container__r5tak { display: none !important; }
         a[href*="streamlit.io/cloud"] { display: none !important; }
         a[href*="share.streamlit.io"] { display: none !important; }
-        /* ヘッダー右上にあるメニュー系（Fork/GitHubアイコン） */
-        header [data-testid="stHeader"] button,
-        header button[kind="header"] { display: none !important; }
+        /* ヘッダー右上のFork/GitHub等のメニュー類は stToolbar 側で
+           まとめて非表示にしているため、ここで header 配下の button を
+           広く隠すのは行わない（サイドバー再表示ボタン「»」も
+           header 配下の button のため、巻き込んで隠してしまう）。*/
         #MainMenu { visibility: hidden !important; }
         footer { visibility: hidden !important; }
         </style>
