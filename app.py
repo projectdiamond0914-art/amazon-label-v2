@@ -940,46 +940,28 @@ def main():
     st.markdown(
         """
         <style>
-        /* Streamlit Cloud が埋め込む外側ツールバー（Share, Fork, GitHub, ⋮ など）を隠す */
-        [data-testid="stToolbar"] { display: none !important; }
+        /* Streamlit Cloud が埋め込む外側ツールバー（Share, Fork, GitHub, ⋮ など）を
+           「見えなくする」が、レイアウトの場所は確保しておく。
+           display: none にすると stToolbar の子要素であるサイドバー再表示ボタン
+           （stExpandSidebarButton）まで巻き込んで描画されなくなるため、
+           visibility: hidden で個別子要素だけを再表示する戦略を取る。*/
+        [data-testid="stToolbar"] {
+            visibility: hidden !important;
+        }
+        /* サイドバー折りたたみ時の「»」（再表示）ボタンだけは見えるように戻す。*/
+        [data-testid="stToolbar"] [data-testid="stExpandSidebarButton"],
+        [data-testid="stToolbar"] [data-testid="stExpandSidebarButton"] * {
+            visibility: visible !important;
+        }
+
         [data-testid="stDecoration"] { display: none !important; }
         [data-testid="stStatusWidget"] { display: none !important; }
         .stDeployButton { display: none !important; }
         .viewerBadge_container__r5tak { display: none !important; }
         a[href*="streamlit.io/cloud"] { display: none !important; }
         a[href*="share.streamlit.io"] { display: none !important; }
-        /* ヘッダー右上のFork/GitHub等のメニュー類は stToolbar 側で
-           まとめて非表示にしているため、ここで header 配下の button を
-           広く隠すのは行わない（サイドバー再表示ボタン「»」も
-           header 配下の button のため、巻き込んで隠してしまう）。*/
         #MainMenu { visibility: hidden !important; }
         footer { visibility: hidden !important; }
-
-        /* サイドバー折りたたみ時の「»」（再表示）ボタンを確実に表示する。
-           Streamlit Cloud のヘッダー描画パスでは親 flex コンテナが
-           0×0 に潰れることがあるため、明示的にサイズと可視性を強制する。*/
-        [data-testid="stExpandSidebarButton"],
-        [data-testid="stSidebarCollapsedControl"] {
-            display: flex !important;
-            visibility: visible !important;
-            opacity: 1 !important;
-            width: 36px !important;
-            height: 36px !important;
-            min-width: 36px !important;
-            min-height: 36px !important;
-            align-items: center !important;
-            justify-content: center !important;
-        }
-        [data-testid="stExpandSidebarButton"] svg,
-        [data-testid="stSidebarCollapsedControl"] svg {
-            width: 20px !important;
-            height: 20px !important;
-        }
-        /* 折りたたみ済み状態のヘッダー領域が flex 0 で潰れないよう、
-           親側にも最小サイズを指定する。*/
-        [data-testid="stHeader"] {
-            min-height: 44px !important;
-        }
         </style>
         """,
         unsafe_allow_html=True,
