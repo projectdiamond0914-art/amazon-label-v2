@@ -954,6 +954,32 @@ def main():
            header 配下の button のため、巻き込んで隠してしまう）。*/
         #MainMenu { visibility: hidden !important; }
         footer { visibility: hidden !important; }
+
+        /* サイドバー折りたたみ時の「»」（再表示）ボタンを確実に表示する。
+           Streamlit Cloud のヘッダー描画パスでは親 flex コンテナが
+           0×0 に潰れることがあるため、明示的にサイズと可視性を強制する。*/
+        [data-testid="stExpandSidebarButton"],
+        [data-testid="stSidebarCollapsedControl"] {
+            display: flex !important;
+            visibility: visible !important;
+            opacity: 1 !important;
+            width: 36px !important;
+            height: 36px !important;
+            min-width: 36px !important;
+            min-height: 36px !important;
+            align-items: center !important;
+            justify-content: center !important;
+        }
+        [data-testid="stExpandSidebarButton"] svg,
+        [data-testid="stSidebarCollapsedControl"] svg {
+            width: 20px !important;
+            height: 20px !important;
+        }
+        /* 折りたたみ済み状態のヘッダー領域が flex 0 で潰れないよう、
+           親側にも最小サイズを指定する。*/
+        [data-testid="stHeader"] {
+            min-height: 44px !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
