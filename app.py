@@ -537,14 +537,6 @@ def render_sidebar(ls: LocalStorage):
             "同じブラウザで再ログインすれば前回の設定が復元されます。"
         )
 
-        if st.button("🗑️ 保存された設定をクリア", use_container_width=True, help="このブラウザの保存データを削除して初期化します"):
-            clear_settings_from_storage(ls, st.session_state["user_email"])
-            st.session_state["default_mic"] = True
-            st.session_state["default_extra"] = ""
-            st.session_state["fnsku_rows"] = []
-            st.success("保存された設定をクリアしました。")
-            st.rerun()
-
 
 def render_processor(ls: LocalStorage):
     """PDF処理メイン画面"""
