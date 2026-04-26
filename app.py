@@ -180,12 +180,24 @@ def reverify_current_license(force_fresh: bool = False) -> tuple[bool, str]:
 
 
 def _clear_session_on_license_fail():
-    """ライセンス失効時のセッションクリア共通処理"""
+    """ライセンス失効時／ログアウト時のセッションクリア共通処理。
+
+    ブラウザlocalStorage上の保存データはユーザー別キーで管理しているため
+    そのまま残すが、メモリ上の session_state は次のログインに引き継がない
+    ように完全初期化する（同一ブラウザで別アカウントにログインし直した
+    際に前ユーザーのFNSKU/テキストが見える事故を防ぐ）。
+    """
     st.session_state["licensed"] = False
     st.session_state["user_email"] = ""
     st.session_state["license_key"] = ""
     st.session_state.pop("_verify_last_at", None)
     st.session_state.pop("_verify_last_result", None)
+    # UI 入力値もすべてリセット
+    st.session_state["default_mic"] = True
+    st.session_state["default_extra"] = ""
+    st.session_state["fnsku_rows"] = []
+    st.session_state["_settings_loaded"] = False
+    st.session_state["processed_results"] = None
 
 
 # ========== PDF処理 ==========
@@ -741,7 +753,12 @@ def _persist_current_settings(ls: LocalStorage, silent: bool = False):
 
 
 def _load_settings_if_needed(ls: LocalStorage):
-    """ログイン直後に一度だけ localStorage から設定を復元"""
+    """ログイン直後に一度だけ localStorage から設定を復元。
+
+    新しいユーザーに保存設定が存在しない場合は、必ずデフォルト値に
+    リセットする（前ユーザーのデータが session_state に残ったまま
+    表示される事故を防ぐため）。
+    """
     if st.session_state.get("_settings_loaded"):
         return
     email = st.session_state.get("user_email", "")
@@ -763,6 +780,12 @@ def _load_settings_if_needed(ls: LocalStorage):
                 "extra": str(r.get("extra") or "").strip(),
             })
         st.session_state["fnsku_rows"] = clean_rows
+    else:
+        # この email には保存設定なし → デフォルト値で初期化
+        # （前ユーザーの fnsku_rows がメモリ上に残っているケースを防ぐ）
+        st.session_state["default_mic"] = True
+        st.session_state["default_extra"] = ""
+        st.session_state["fnsku_rows"] = []
     st.session_state["_settings_loaded"] = True
 
 
