@@ -558,175 +558,167 @@ def render_processor(ls: LocalStorage):
         "複数PDFの同時処理にも対応。"
     )
 
-    # ① 挿入設定 ／ ② PDFアップロード ／ ③ 実行 ボタン群を単一の st.form に
-    # 包むことで、data_editor のセル編集中に「💾 設定を保存」または
-    # 「▶️ PDFを処理する」を押した際の「セル確定イベントとボタンクリック
-    # イベントの競合により1回目で反映されない」問題（Streamlit issue #5345 系）
-    # を構造的に解消する。form_submit_button が押されると Streamlit が
-    # form 内の全ウィジェット値をアトミックに確定してから次の rerun を
-    # 実行するため、競合は原理的に発生しない。
-    with st.form("main_form", clear_on_submit=False, border=False):
-        # ========== ① 挿入設定 ==========
-        st.markdown("## ① 挿入設定")
+    # ========== ① 挿入設定 ==========
+    st.markdown("## ① 挿入設定")
 
-        with st.container(border=True):
-            st.markdown("**デフォルト設定**（FNSKU別の個別設定がないラベルに適用されます）")
-            col1, col2 = st.columns([1, 2])
-            with col1:
-                default_mic = st.checkbox(
-                    '"Made in China" を入れる',
-                    value=st.session_state["default_mic"],
-                    key="default_mic_cb",
-                    help="オンにすると、対象ラベルに「Made in China」が挿入されます",
-                )
-            with col2:
-                default_extra = st.text_input(
-                    "追加テキスト（任意）",
-                    value=st.session_state["default_extra"],
-                    key="default_extra_ti",
-                    placeholder="例: iPhone15用 / Imported by XYZ 等",
-                    help='「Made in China」の後ろに続けて挿入されます。空欄なら「Made in China」のみ',
-                )
-
-            # プレビュー（form 内なので submit 後の rerun で最新値が反映される）
-            _preview = _preview_text(default_mic, default_extra)
-            if _preview:
-                st.success(f"デフォルトで挿入される文言: **{_preview}**")
-            else:
-                st.info("デフォルトでは何も挿入されません（チェックも追加テキストも空）")
-
-        with st.container(border=True):
-            st.markdown("**FNSKU別の個別設定**（特定のFNSKUだけ別の文言にしたい場合）")
-            st.caption(
-                "表に FNSKU・チェック・追加テキストを直接入力してください。"
-                "行の追加は表の最下段の「+」から、削除は行左端のチェックで選択 → キーボードの Delete で可能です。"
+    with st.container(border=True):
+        st.markdown("**デフォルト設定**（FNSKU別の個別設定がないラベルに適用されます）")
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            default_mic = st.checkbox(
+                '"Made in China" を入れる',
+                value=st.session_state["default_mic"],
+                key="default_mic_cb",
+                help="オンにすると、対象ラベルに「Made in China」が挿入されます",
             )
-
-            # 表示用にDataFrameを作る
-            rows = st.session_state["fnsku_rows"] or []
-            if rows:
-                df = pd.DataFrame(rows)
-            else:
-                df = pd.DataFrame({"fnsku": pd.Series(dtype=str), "mic": pd.Series(dtype=bool), "extra": pd.Series(dtype=str)})
-
-            # カラムが欠けている場合の補完（旧データとの互換）
-            for col, default in [("fnsku", ""), ("mic", True), ("extra", "")]:
-                if col not in df.columns:
-                    df[col] = default
-            df = df[["fnsku", "mic", "extra"]]
-
-            edited = st.data_editor(
-                df,
-                num_rows="dynamic",
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "fnsku": st.column_config.TextColumn(
-                        "FNSKU",
-                        required=False,
-                        width="medium",
-                        help="Amazon FNSKU（X + 英数字9文字）",
-                    ),
-                    "mic": st.column_config.CheckboxColumn(
-                        '"Made in China" を入れる',
-                        default=True,
-                        width="small",
-                    ),
-                    "extra": st.column_config.TextColumn(
-                        "追加テキスト",
-                        default="",
-                        width="large",
-                        help='空欄ならチェック通りの動作（"Made in China"のみ等）',
-                    ),
-                },
-                key="fnsku_editor",
+        with col2:
+            default_extra = st.text_input(
+                "追加テキスト（任意）",
+                value=st.session_state["default_extra"],
+                key="default_extra_ti",
+                placeholder="例: iPhone15用 / Imported by XYZ 等",
+                help='「Made in China」の後ろに続けて挿入されます。空欄なら「Made in China」のみ',
             )
+        # session_state に反映
+        st.session_state["default_mic"] = default_mic
+        st.session_state["default_extra"] = default_extra
 
-        # ========== ② PDFアップロード ==========
-        st.markdown("## ② PDFをアップロード")
-        uploaded_files = st.file_uploader(
-            "PDFファイルを選択（複数可・ドラッグ&ドロップOK）",
-            type=["pdf"],
-            accept_multiple_files=True,
-        )
+        # プレビュー
+        _preview = _preview_text(default_mic, default_extra)
+        if _preview:
+            st.success(f"デフォルトで挿入される文言: **{_preview}**")
+        else:
+            st.info("デフォルトでは何も挿入されません（チェックも追加テキストも空）")
 
-        # ========== ③ 実行 ==========
-        st.markdown("## ③ 実行")
+    with st.container(border=True):
+        st.markdown("**FNSKU別の個別設定**（特定のFNSKUだけ別の文言にしたい場合）")
         st.caption(
-            "「💾 設定を保存」を押すと、表・チェック・追加テキストの内容を"
-            "ブラウザに保存します。「▶️ PDFを処理する」を押すと、保存と同時に"
-            "アップロードされたPDFを処理します。"
+            "表に FNSKU・チェック・追加テキストを直接入力してください。"
+            "行の追加は表の最下段の「+」から、削除は行左端のチェックで選択 → キーボードの Delete で可能です。"
         )
-        col_save, col_process = st.columns([1, 1])
-        with col_save:
-            save_clicked = st.form_submit_button(
-                "💾 設定を保存",
-                use_container_width=True,
-            )
-        with col_process:
-            process_clicked = st.form_submit_button(
-                "▶️ PDFを処理する",
-                type="primary",
-                use_container_width=True,
-            )
+        st.info(
+            "💡 **入力後の確定操作について**　"
+            "セルに値を入力したら、**必ず「Enterキー」または「Tabキー」を押して確定**してから、"
+            "下の「💾 設定を保存」ボタンを押してください。"
+            "確定前に保存ボタンを押すと、入力途中の文字が反映されないことがあります。",
+            icon="✏️",
+        )
 
-    # form 外で submit 結果を処理する。
-    # form_submit_button 押下時、Streamlit は form 内の全ウィジェット値を
-    # アトミックに確定済みなので、ここでは local 変数を読むだけで OK。
-    if save_clicked or process_clicked:
+        # 表示用にDataFrameを作る
+        rows = st.session_state["fnsku_rows"] or []
+        if rows:
+            df = pd.DataFrame(rows)
+        else:
+            df = pd.DataFrame({"fnsku": pd.Series(dtype=str), "mic": pd.Series(dtype=bool), "extra": pd.Series(dtype=str)})
+
+        # カラムが欠けている場合の補完（旧データとの互換）
+        for col, default in [("fnsku", ""), ("mic", True), ("extra", "")]:
+            if col not in df.columns:
+                df[col] = default
+        df = df[["fnsku", "mic", "extra"]]
+
+        edited = st.data_editor(
+            df,
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "fnsku": st.column_config.TextColumn(
+                    "FNSKU",
+                    required=False,
+                    width="medium",
+                    help="Amazon FNSKU（X + 英数字9文字）",
+                ),
+                "mic": st.column_config.CheckboxColumn(
+                    '"Made in China" を入れる',
+                    default=True,
+                    width="small",
+                ),
+                "extra": st.column_config.TextColumn(
+                    "追加テキスト",
+                    default="",
+                    width="large",
+                    help='空欄ならチェック通りの動作（"Made in China"のみ等）',
+                ),
+            },
+            key="fnsku_editor",
+        )
+        # DataFrame → list of dicts に戻す
         new_rows = edited.to_dict("records")
+        # NaN / None を空文字に正規化
         for r in new_rows:
             r["fnsku"] = (r.get("fnsku") or "").strip() if isinstance(r.get("fnsku"), str) else ""
             r["extra"] = (r.get("extra") or "").strip() if isinstance(r.get("extra"), str) else ""
             r["mic"] = bool(r.get("mic")) if r.get("mic") is not None else True
-
-        st.session_state["default_mic"] = default_mic
-        st.session_state["default_extra"] = default_extra
         st.session_state["fnsku_rows"] = new_rows
 
-        _persist_current_settings(ls, silent=process_clicked)
+        # FNSKU別プレビュー
+        non_empty_rows = [r for r in new_rows if r["fnsku"]]
+        if non_empty_rows:
+            with st.expander(f"📋 FNSKU別の挿入内容プレビュー（{len(non_empty_rows)}件）"):
+                preview_df = pd.DataFrame([
+                    {
+                        "FNSKU": r["fnsku"],
+                        "挿入される文言": _preview_text(r["mic"], r["extra"]) or "（何も挿入しない）",
+                    }
+                    for r in non_empty_rows
+                ])
+                st.dataframe(preview_df, use_container_width=True, hide_index=True)
 
-        if save_clicked:
+    # 設定を保存ボタン（明示的な保存のみ。自動保存は行わない）
+    # 理由：毎描画ごとに localStorage へ書き込むと rerun が発生し、
+    # 表（data_editor）への入力が 1 回で反映されない症状が出るため、
+    # 保存は「明示的なタイミング」に限定する。
+    col_save, col_info = st.columns([1, 3])
+    with col_save:
+        if st.button("💾 設定を保存", type="primary", use_container_width=True):
+            _persist_current_settings(ls)
             st.toast("設定をブラウザに保存しました。", icon="✅")
+    with col_info:
+        st.caption(
+            "※ 表・チェック・追加テキストを変更したら、"
+            "この「💾 設定を保存」ボタンを押してください。"
+            "「▶️ PDFを処理する」を押したときと「ログアウト」のときも自動で保存します。"
+        )
 
-    # FNSKU別プレビュー（form 外。session_state の最新値を参照）
-    _preview_rows = [
-        r for r in (st.session_state.get("fnsku_rows") or [])
-        if r.get("fnsku")
-    ]
-    if _preview_rows:
-        with st.expander(f"📋 FNSKU別の挿入内容プレビュー（{len(_preview_rows)}件）"):
-            preview_df = pd.DataFrame([
-                {
-                    "FNSKU": r["fnsku"],
-                    "挿入される文言": _preview_text(r["mic"], r["extra"]) or "（何も挿入しない）",
-                }
-                for r in _preview_rows
-            ])
-            st.dataframe(preview_df, use_container_width=True, hide_index=True)
+    # ========== ② PDFアップロード ==========
+    st.markdown("## ② PDFをアップロード")
+    uploaded_files = st.file_uploader(
+        "PDFファイルを選択（複数可・ドラッグ&ドロップOK）",
+        type=["pdf"],
+        accept_multiple_files=True,
+    )
 
-    # 処理実行
-    if process_clicked:
-        if not uploaded_files:
-            st.warning("PDFがアップロードされていません。「② PDFをアップロード」からファイルを選択してから、もう一度「▶️ PDFを処理する」を押してください。")
-        else:
-            # 処理実行時は必ず最新のライセンス状態を取得（キャッシュ無視）
-            with st.spinner("ライセンスを確認中..."):
-                ok, err = reverify_current_license(force_fresh=True)
-            if not ok:
-                st.error(f"ライセンスが無効です：{err}")
-                st.warning("再度ログインしてください。ログイン画面へ戻ります。")
-                _clear_session_on_license_fail()
-                time.sleep(2)
-                st.rerun()
-                return
+    if not uploaded_files:
+        st.info("処理したいPDFをドラッグ&ドロップ、または「Browse files」から選択してください。")
+        return
 
-            rules, default_mode, default_extra_clean = ui_settings_to_rules(
-                st.session_state["default_mic"],
-                st.session_state["default_extra"],
-                st.session_state["fnsku_rows"],
-            )
-            process_uploaded_files(uploaded_files, rules, default_mode, default_extra_clean)
+    st.markdown(f"**{len(uploaded_files)}件** のPDFがアップロードされました。")
+
+    # ========== ③ 実行 ==========
+    st.markdown("## ③ 実行")
+    if st.button("▶️ PDFを処理する", type="primary", use_container_width=True):
+        # 処理実行時は必ず最新のライセンス状態を取得（キャッシュ無視）
+        with st.spinner("ライセンスを確認中..."):
+            ok, err = reverify_current_license(force_fresh=True)
+        if not ok:
+            st.error(f"ライセンスが無効です：{err}")
+            st.warning("再度ログインしてください。ログイン画面へ戻ります。")
+            _clear_session_on_license_fail()
+            time.sleep(2)
+            st.rerun()
+            return
+
+        # 処理を開始する直前に現在の設定を localStorage に保存しておく。
+        # （実行＝設定が確定したタイミングとみなして安全に書き込む）
+        _persist_current_settings(ls, silent=True)
+
+        rules, default_mode, default_extra_clean = ui_settings_to_rules(
+            st.session_state["default_mic"],
+            st.session_state["default_extra"],
+            st.session_state["fnsku_rows"],
+        )
+        process_uploaded_files(uploaded_files, rules, default_mode, default_extra_clean)
 
     # 前回処理結果があれば表示（rerunで消えないように session_state に保存）
     if st.session_state.get("processed_results"):
