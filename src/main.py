@@ -197,16 +197,39 @@ def find_labels_in_page(page) -> list[dict]:
 
     page.extract_text(visitor_text=visitor)
 
-    # 各「新品」位置に最も近いFNSKUを割り当てる
+    # 各「新品」位置に対応するFNSKUを割り当てる。
+    #
+    # v2.0.1 修正（2026-05-15）:
+    #   従来は (x, y) のユークリッド距離で「最も近いFNSKU」を選んでいたが、
+    #   最下行のラベルにおいて、真上のFNSKUより右隣の列のFNSKUの方が距離が
+    #   近くなる場合があり、隣列のテキストが誤って割り当てられる不具合があった。
+    #   ラベルはグリッドに整列している前提で、まず「同じ行」のFNSKUに絞り、
+    #   その中でX座標が最も近いものを選ぶ実装に変更。
     labels = []
     for sx, sy, sfs in shinpin_positions:
+        # 「同じ行」と見なすY方向の許容差（文字サイズ × 4）
+        row_tolerance = max(sfs * 4, 12.0)
+
+        # 1) まずは同じ行のFNSKU候補に絞る
+        same_row = [
+            (fnsku, fx, fy)
+            for fnsku, fx, fy in fnsku_positions
+            if abs(fy - sy) <= row_tolerance
+        ]
+
         closest_fnsku = None
-        closest_dist = float("inf")
-        for fnsku, fx, fy in fnsku_positions:
-            dist = ((fx - sx) ** 2 + (fy - sy) ** 2) ** 0.5
-            if dist < closest_dist:
-                closest_dist = dist
-                closest_fnsku = fnsku
+        if same_row:
+            # 同じ行の中で X 距離が最小のものを選ぶ
+            closest_fnsku = min(same_row, key=lambda t: abs(t[1] - sx))[0]
+        else:
+            # フォールバック: 同じ行が見つからない場合は従来通り最近傍
+            closest_dist = float("inf")
+            for fnsku, fx, fy in fnsku_positions:
+                dist = ((fx - sx) ** 2 + (fy - sy) ** 2) ** 0.5
+                if dist < closest_dist:
+                    closest_dist = dist
+                    closest_fnsku = fnsku
+
         labels.append({
             "fnsku": closest_fnsku,
             "shinpin_pos": (sx, sy, sfs),
