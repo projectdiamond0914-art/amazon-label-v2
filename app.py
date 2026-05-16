@@ -23,6 +23,7 @@ from datetime import datetime
 from io import BytesIO
 
 import pandas as pd
+import pdfplumber
 import streamlit as st
 from pypdf import PdfReader, PdfWriter
 from reportlab.pdfbase import pdfmetrics
@@ -203,46 +204,50 @@ def _clear_session_on_license_fail():
 # ========== PDF処理 ==========
 
 def find_labels_in_page(page) -> list[dict]:
-    """ページ内のラベルを検出。FNSKUと「新品」座標を対応付け。"""
+    """ページ内のラベルを検出。FNSKUと「新品」座標を対応付け。
+
+    v2.0.3 修正（2026-05-17）:
+      pypdf.PdfReader 由来の page では最下行の一部 FNSKU が抽出されない
+      エッジケースが確認されたため、pdfplumber.Page で抽出する実装に切替。
+      Amazonラベル PDF では FNSKU と「新品」が同 Y 座標に並ぶことが解析で
+      判明しているため、同 Y のFNSKU の中で X 距離最小を選ぶ。
+    """
     fnsku_positions: list[tuple[str, float, float]] = []
     shinpin_positions: list[tuple[float, float, float]] = []
 
-    def visitor(text, cm, tm, font_dict, font_size):
+    # 左下原点（ReportLab 互換）に統一
+    page_h = float(page.height)
+
+    words = page.extract_words(use_text_flow=True, x_tolerance=2, y_tolerance=2)
+    for w in words:
+        text = w.get("text", "")
         if not text:
-            return
-        x, y = tm[4], tm[5]
-        match = FNSKU_PATTERN.search(text)
-        if match:
-            fnsku_positions.append((match.group(), x, y))
+            continue
+        x0 = float(w["x0"])
+        top = float(w["top"])
+        y = page_h - top
+        size = float(w.get("bottom", top + 10)) - top
+        if size <= 0:
+            size = 10.0
+
+        m = FNSKU_PATTERN.search(text)
+        if m:
+            fnsku_positions.append((m.group(), x0, y))
         if "新品" in text:
-            shinpin_positions.append((x, y, font_size))
+            shinpin_positions.append((x0, y, size))
 
-    page.extract_text(visitor_text=visitor)
-
-    # v2.0.1 修正（2026-05-15）:
-    #   従来は (x, y) のユークリッド距離で「最も近いFNSKU」を選んでいたが、
-    #   最下行のラベルにおいて、真上のFNSKUより右隣の列のFNSKUの方が距離が
-    #   近くなる場合があり、隣列のテキストが誤って割り当てられる不具合があった。
-    #   ラベルはグリッドに整列している前提で、まず「同じ行」のFNSKUに絞り、
-    #   その中でX座標が最も近いものを選ぶ実装に変更。
     labels = []
     for sx, sy, sfs in shinpin_positions:
-        # 「同じ行」と見なすY方向の許容差（文字サイズ × 4）
-        row_tolerance = max(sfs * 4, 12.0)
-
-        # 1) まずは同じ行のFNSKU候補に絞る
-        same_row = [
+        y_tol = max(sfs * 2.0, 8.0)
+        same_y = [
             (fnsku, fx, fy)
             for fnsku, fx, fy in fnsku_positions
-            if abs(fy - sy) <= row_tolerance
+            if abs(fy - sy) <= y_tol
         ]
-
         closest_fnsku = None
-        if same_row:
-            # 同じ行の中で X 距離が最小のものを選ぶ
-            closest_fnsku = min(same_row, key=lambda t: abs(t[1] - sx))[0]
+        if same_y:
+            closest_fnsku = min(same_y, key=lambda t: abs(t[1] - sx))[0]
         else:
-            # フォールバック: 同じ行が見つからない場合は従来通り最近傍
             closest_dist = float("inf")
             for fnsku, fx, fy in fnsku_positions:
                 dist = ((fx - sx) ** 2 + (fy - sy) ** 2) ** 0.5
@@ -358,6 +363,14 @@ def process_pdf_bytes(
     if len(reader.pages) == 0:
         raise PDFProcessingError("このPDFにはページがありません。別のファイルをお試しください。")
 
+    # v2.0.3: ラベル位置抽出には pdfplumber を使う（同 PDF を別途開く）
+    try:
+        plumber_pdf = pdfplumber.open(BytesIO(input_bytes))
+    except Exception as e:
+        raise PDFProcessingError(
+            f"PDFを開けませんでした。ファイルが破損している可能性があります。（詳細: {e}）"
+        ) from e
+
     writer = PdfWriter()
     total_labels = 0
     detected_fnskus: set[str] = set()
@@ -368,7 +381,8 @@ def process_pdf_bytes(
             width = float(media_box.width)
             height = float(media_box.height)
 
-            labels = find_labels_in_page(page)
+            plumber_page = plumber_pdf.pages[page_idx - 1]
+            labels = find_labels_in_page(plumber_page)
             total_labels += len(labels)
 
             label_items = []
@@ -406,6 +420,12 @@ def process_pdf_bytes(
         raise PDFProcessingError(
             f"処理結果の書き出し中にエラーが発生しました。（詳細: {e}）"
         ) from e
+    finally:
+        # pdfplumber 後始末
+        try:
+            plumber_pdf.close()
+        except Exception:
+            pass
 
     return out_buf.getvalue(), len(reader.pages), total_labels, detected_fnskus
 

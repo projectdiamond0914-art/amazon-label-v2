@@ -27,6 +27,7 @@ from tkinter import (
     W, E, N, S, NSEW
 )
 from pypdf import PdfReader, PdfWriter
+import pdfplumber
 from reportlab.pdfgen import canvas
 
 # ========== 設定 ==========
@@ -177,52 +178,63 @@ def find_labels_in_page(page) -> list[dict]:
     """
     ページ内のラベルを検出して、各ラベルのFNSKUと「新品」座標を対応付ける。
     返り値: [{"fnsku": str, "shinpin_pos": (x, y, font_size)}, ...]
+
+    v2.0.3 修正（2026-05-17）:
+      pypdf の visitor_text 方式では、最下行のFNSKUの一部が抽出されない
+      エッジケースが確認されたため、pdfplumber.Page で文字列位置を抽出する
+      実装に置き換えた。pdfplumber は座標抽出が精緻で、PDF 内のすべての
+      ラベルを取りこぼしなく拾える。
+
+    page 引数: pdfplumber.page.Page を期待
     """
     fnsku_positions: list[tuple[str, float, float]] = []
     shinpin_positions: list[tuple[float, float, float]] = []
 
-    def visitor(text, cm, tm, font_dict, font_size):
+    # pdfplumber の座標系は左上原点（top が小さいほど上）。
+    # オーバーレイ描画は ReportLab の左下原点（y が大きいほど上）に揃えるため
+    # ここで page.height - top に変換しておく。
+    page_h = float(page.height)
+
+    words = page.extract_words(use_text_flow=True, x_tolerance=2, y_tolerance=2)
+    for w in words:
+        text = w.get("text", "")
         if not text:
-            return
-        x, y = tm[4], tm[5]
+            continue
+        x0 = float(w["x0"])
+        top = float(w["top"])
+        y = page_h - top  # 左下原点へ
+        # フォントサイズは bottom - top（行高）の近似
+        size = float(w.get("bottom", top + 10)) - top
+        if size <= 0:
+            size = 10.0
 
-        # FNSKU検出
-        match = FNSKU_PATTERN.search(text)
-        if match:
-            fnsku_positions.append((match.group(), x, y))
-
-        # 「新品」検出
+        m = FNSKU_PATTERN.search(text)
+        if m:
+            fnsku_positions.append((m.group(), x0, y))
         if "新品" in text:
-            shinpin_positions.append((x, y, font_size))
-
-    page.extract_text(visitor_text=visitor)
+            shinpin_positions.append((x0, y, size))
 
     # 各「新品」位置に対応するFNSKUを割り当てる。
     #
-    # v2.0.1 修正（2026-05-15）:
-    #   従来は (x, y) のユークリッド距離で「最も近いFNSKU」を選んでいたが、
-    #   最下行のラベルにおいて、真上のFNSKUより右隣の列のFNSKUの方が距離が
-    #   近くなる場合があり、隣列のテキストが誤って割り当てられる不具合があった。
-    #   ラベルはグリッドに整列している前提で、まず「同じ行」のFNSKUに絞り、
-    #   その中でX座標が最も近いものを選ぶ実装に変更。
+    # Amazonラベル PDF では、FNSKU と「新品」が同じ Y 座標に並んでいる
+    # （セル内で同じ行）ことが実機解析で判明。同じ Y の FNSKU の中で
+    # X 距離が最小のものを選ぶ。
     labels = []
     for sx, sy, sfs in shinpin_positions:
-        # 「同じ行」と見なすY方向の許容差（文字サイズ × 4）
-        row_tolerance = max(sfs * 4, 12.0)
+        y_tol = max(sfs * 2.0, 8.0)
 
-        # 1) まずは同じ行のFNSKU候補に絞る
-        same_row = [
+        # 同じ行（Y 一致 ± 許容）の FNSKU 候補
+        same_y = [
             (fnsku, fx, fy)
             for fnsku, fx, fy in fnsku_positions
-            if abs(fy - sy) <= row_tolerance
+            if abs(fy - sy) <= y_tol
         ]
 
         closest_fnsku = None
-        if same_row:
-            # 同じ行の中で X 距離が最小のものを選ぶ
-            closest_fnsku = min(same_row, key=lambda t: abs(t[1] - sx))[0]
+        if same_y:
+            closest_fnsku = min(same_y, key=lambda t: abs(t[1] - sx))[0]
         else:
-            # フォールバック: 同じ行が見つからない場合は従来通り最近傍
+            # フォールバック: 全 FNSKU の中で最近傍
             closest_dist = float("inf")
             for fnsku, fx, fy in fnsku_positions:
                 dist = ((fx - sx) ** 2 + (fy - sy) ** 2) ** 0.5
@@ -281,41 +293,46 @@ def create_overlay(width, height, label_items, font_name, font_size, right_offse
 
 
 def process_pdf(input_path: str, output_path: str, rules: dict, default_mode: str, default_extra: str) -> tuple[int, int, set[str]]:
-    """PDFを処理。返り値: (ページ数, ラベル数, 検出FNSKU一覧)"""
+    """PDFを処理。返り値: (ページ数, ラベル数, 検出FNSKU一覧)
+
+    v2.0.3: ラベル位置抽出を pdfplumber に切り替え。
+    """
     reader = PdfReader(input_path)
     writer = PdfWriter()
 
     total_labels = 0
     detected_fnskus: set[str] = set()
 
-    for page in reader.pages:
-        media_box = page.mediabox
-        width = float(media_box.width)
-        height = float(media_box.height)
+    with pdfplumber.open(input_path) as plumber_pdf:
+        for idx, page in enumerate(reader.pages):
+            media_box = page.mediabox
+            width = float(media_box.width)
+            height = float(media_box.height)
 
-        labels = find_labels_in_page(page)
-        total_labels += len(labels)
+            plumber_page = plumber_pdf.pages[idx]
+            labels = find_labels_in_page(plumber_page)
+            total_labels += len(labels)
 
-        label_items = []
-        for lbl in labels:
-            if lbl["fnsku"]:
-                detected_fnskus.add(lbl["fnsku"])
-            text = get_text_for_fnsku(lbl["fnsku"], rules, default_mode, default_extra)
-            label_items.append({
-                "shinpin_pos": lbl["shinpin_pos"],
-                "text": text,
-            })
+            label_items = []
+            for lbl in labels:
+                if lbl["fnsku"]:
+                    detected_fnskus.add(lbl["fnsku"])
+                text = get_text_for_fnsku(lbl["fnsku"], rules, default_mode, default_extra)
+                label_items.append({
+                    "shinpin_pos": lbl["shinpin_pos"],
+                    "text": text,
+                })
 
-        if label_items:
-            overlay_buf = create_overlay(
-                width, height, label_items,
-                FONT_NAME, FONT_SIZE, RIGHT_OFFSET_PT
-            )
-            overlay_reader = PdfReader(overlay_buf)
-            overlay_page = overlay_reader.pages[0]
-            page.merge_page(overlay_page)
+            if label_items:
+                overlay_buf = create_overlay(
+                    width, height, label_items,
+                    FONT_NAME, FONT_SIZE, RIGHT_OFFSET_PT
+                )
+                overlay_reader = PdfReader(overlay_buf)
+                overlay_page = overlay_reader.pages[0]
+                page.merge_page(overlay_page)
 
-        writer.add_page(page)
+            writer.add_page(page)
 
     with open(output_path, "wb") as f:
         writer.write(f)
