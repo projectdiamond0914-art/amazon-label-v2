@@ -191,8 +191,11 @@ def find_labels_in_page(page) -> list[dict]:
     shinpin_positions: list[tuple[float, float, float]] = []
 
     # pdfplumber の座標系は左上原点（top が小さいほど上）。
-    # オーバーレイ描画は ReportLab の左下原点（y が大きいほど上）に揃えるため
-    # ここで page.height - top に変換しておく。
+    # オーバーレイ描画は ReportLab の左下原点（y が大きいほど上）かつ
+    # drawString の y はテキストの「ベースライン」を指定する仕様。
+    # pdfplumber の word の bottom はテキスト下端（≒ベースライン相当）なので、
+    # 左下原点 y = page.height - bottom とすると、pypdf の tm[5]（visitor_text の y）
+    # と同等の値となり、オーバーレイが正しい位置に描画される。
     page_h = float(page.height)
 
     words = page.extract_words(use_text_flow=True, x_tolerance=2, y_tolerance=2)
@@ -202,9 +205,9 @@ def find_labels_in_page(page) -> list[dict]:
             continue
         x0 = float(w["x0"])
         top = float(w["top"])
-        y = page_h - top  # 左下原点へ
-        # フォントサイズは bottom - top（行高）の近似
-        size = float(w.get("bottom", top + 10)) - top
+        bottom = float(w.get("bottom", top + 10))
+        y = page_h - bottom  # ベースライン相当（左下原点）
+        size = bottom - top
         if size <= 0:
             size = 10.0
 

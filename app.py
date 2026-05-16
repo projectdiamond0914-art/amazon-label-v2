@@ -215,7 +215,7 @@ def find_labels_in_page(page) -> list[dict]:
     fnsku_positions: list[tuple[str, float, float]] = []
     shinpin_positions: list[tuple[float, float, float]] = []
 
-    # 左下原点（ReportLab 互換）に統一
+    # 左下原点（ReportLab 互換）に統一。bottom 基準でベースラインに揃える。
     page_h = float(page.height)
 
     words = page.extract_words(use_text_flow=True, x_tolerance=2, y_tolerance=2)
@@ -225,8 +225,9 @@ def find_labels_in_page(page) -> list[dict]:
             continue
         x0 = float(w["x0"])
         top = float(w["top"])
-        y = page_h - top
-        size = float(w.get("bottom", top + 10)) - top
+        bottom = float(w.get("bottom", top + 10))
+        y = page_h - bottom  # ベースライン相当
+        size = bottom - top
         if size <= 0:
             size = 10.0
 
